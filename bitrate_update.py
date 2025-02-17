@@ -1,5 +1,11 @@
-import bitrate_utils
-import requests
+from bitrate_utils import calculate_tx_throughput, update_queue_bitrate
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+THRESHOLD = os.getenv('THRESHOLD')
+NEW_BITRATE = os.getenv('NEW_BITRATE')
+DEFAULT_BITRATE = os.getenv('DEFAULT_BITRATE')
 
 tx_throughput = calculate_tx_throughput()
 
