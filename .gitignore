@@ -1,4 +1,5 @@
 __pycache__/
 .env
 test.py
-bitrate_learn.py
+bitrate_train.py
+bitrate_adapt_lstm.py
