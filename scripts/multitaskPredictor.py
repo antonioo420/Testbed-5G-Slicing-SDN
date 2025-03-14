@@ -3,7 +3,7 @@ import requests
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model, Model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, ReLU
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError
@@ -46,9 +46,12 @@ def build_lstm_model():
     x = Dropout(0.2)(x)
     x = LSTM(50, return_sequences=True)(x)
     x = Dropout(0.2)(x)
-    x = LSTM(50, return_sequences=True)(x)
+    x = LSTM(50, return_sequences=False)(x)
     x = Dropout(0.5)(x)
-    x = Dense(50, 50)
+    
+    x = Dense(50)(x)        
+    x = ReLU()(x) 
+    #x = Dense(50)(x)        
 
     # Output 1: Throughput (regression)
     throughput_output = Dense(1, name='throughput_output')(x)
@@ -174,7 +177,7 @@ def train_model(x_train, y_train_throughput, y_train_class, model, epochs = 100,
             'classification_output': ['accuracy'],  # Precisión para clasificación
         }
     )
-    
+    model.summary()
     lr_sched = step_decay_schedule(initial_lr=1e-3, decay_factor=0.75, step_size=5)
 
     model.fit(

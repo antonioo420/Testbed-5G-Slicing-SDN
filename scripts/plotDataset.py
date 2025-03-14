@@ -16,7 +16,7 @@ def plot_csv_data(file_path):
     #throughput = throughput[1000:1200]
 
     # Create plot
-    plt.figure(figsize=(20, 12))
+    plt.figure(figsize=(200, 12))
     plt.plot(throughput, color='b', label='Throughput')
 
     # Set labels and title
