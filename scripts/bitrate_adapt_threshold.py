@@ -1,5 +1,4 @@
 from bitrate_utils import calculate_throughput, update_queue_bitrate
-import time
 import os
 from dotenv import load_dotenv
 
@@ -13,12 +12,14 @@ QUEUE_2 = os.getenv('QUEUE2_ID')
 
 # Update parameters
 INTERVAL = 5
-THRESHOLD = 1  # 1 Mbps 
-DEFAULT_BR_1 = 1200000  # 1.2 Mbps
-NEW_BR_1 = 2000000  # 2 Mbps
-TOTAL_BR = 90000000  # 90 Mbps for current scenario
+THRESHOLD = 25  # 25 Mbps 
+DEFAULT_BR_1 = 30000000  # 30 Mbps
+NEW_BR_1 = 60000000  # 60 Mbps
+TOTAL_BR = 80000000  # 80 Mbps for current scenario
 
-previous_state = None
+previous_state = False
+update_queue_bitrate(new_rate=DEFAULT_BR_1, urlflow=URL_QUEUE_1, queue=QUEUE_1)
+update_queue_bitrate(new_rate=TOTAL_BR - DEFAULT_BR_1, urlflow=URL_QUEUE_2, queue=QUEUE_2)
 
 while True:
     throughput = calculate_throughput(interval=INTERVAL, urlstats=URL_STATS_1)
@@ -28,13 +29,11 @@ while True:
         current_state = throughput > THRESHOLD
 
         if current_state != previous_state:
-            if current_state:  # Transitioned to above threshold
+            if current_state:
                 update_queue_bitrate(new_rate=NEW_BR_1, urlflow=URL_QUEUE_1, queue=QUEUE_1)
-                update_queue_bitrate(new_rate=TOTAL_BR - NEW_BR_1, urlflow=URL_QUEUE_2, queue=QUEUE_2)
-            else:  # Transitioned to below threshold
-                update_queue_bitrate(new_rate=NEW_BR_1, urlflow=URL_QUEUE_1, queue=QUEUE_1)
-                update_queue_bitrate(new_rate=TOTAL_BR - NEW_BR_1, urlflow=URL_QUEUE_2, queue=QUEUE_2)
+                update_queue_bitrate(new_rate=TOTAL_BR-NEW_BR_1, urlflow=URL_QUEUE_2, queue=QUEUE_2)
+            else:
+                update_queue_bitrate(new_rate=DEFAULT_BR_1, urlflow=URL_QUEUE_1, queue=QUEUE_1)
+                update_queue_bitrate(new_rate=TOTAL_BR-DEFAULT_BR_1, urlflow=URL_QUEUE_2, queue=QUEUE_2)
             
-            previous_state = current_state  # Update the state
-    
-    time.sleep(INTERVAL)
+            previous_state = current_state

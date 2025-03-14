@@ -9,13 +9,13 @@ AUTH = os.getenv('AUTH')
 
 
 def get_bytes(urlstats):
-    response = requests.get(urlstats, auth=AUTH)
+    response = requests.get(urlstats, auth=("admin","admin"))
     if response.status_code == 200:
         data = response.json()
         try:
             tx_bytes = data["opendaylight-flow-statistics:flow-statistics"]
             instant_throughput = int(tx_bytes["byte-count"])
-            #print(tx_trans)
+            #print(instant_throughput)
             return instant_throughput
         except KeyError:
             print("Error: field not found in API response.")
@@ -56,7 +56,7 @@ def update_queue_bitrate(new_rate,urlflow,queue):
         ]
     }
 
-    response = requests.put(urlflow, json=queue_data, auth=AUTH)
+    response = requests.put(urlflow, json=queue_data, auth=("admin","admin"))
     if response.status_code in [200, 204]:
         print(f"Queue max-rate updated to {new_rate} bps")
     else:
