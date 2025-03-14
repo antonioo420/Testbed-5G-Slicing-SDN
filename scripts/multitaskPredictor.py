@@ -32,7 +32,7 @@ HOSTNAME = "HOST1"
 BASE_URL = f"http://{CONTROLLER_IP}:8181/restconf/config/network-topology:network-topology/topology/ovsdb:1/node/ovsdb%3A%2F%2F{HOSTNAME}/ovsdb:queues/queue%3A%2F%2F{QUEUE_UUID}/"
 
 # Parameters
-LOOKBACK = 30  # Number of previous data points to consider
+LOOKBACK = 40  # Number of previous data points to consider
 ALPHA = 0.3  # EMA smoothing factor
 N_CLASSES = 3 # youtube, twitch, prime, tiktok, navegacion web
 #TRAFFIC_HISTORY = deque(maxlen=LOOKBACK)

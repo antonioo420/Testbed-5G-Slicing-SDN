@@ -43,7 +43,7 @@ for file in csv_files:
     
             
     df_total = pd.concat([df_total, df], ignore_index=True)
-    df.to_csv(file, index=False)            
+    #df.to_csv(file, index=False)            
 
 # Guardar el dataset combinado
 df_total.to_csv(root_dir+'total_dataset.csv', index=False)
