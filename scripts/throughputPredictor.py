@@ -170,15 +170,6 @@ def step_decay_schedule(initial_lr=1e-3, decay_factor=0.75, step_size=5):
 
 def train_model(x_train, y_train, model, epochs = 100, batch_size = 32, path = './traffic_predictor.h5'):
     """Train LSTM model on simulated traffic data."""
-    
-    # Scheduler to reduce learning rate when loss gets stuck
-    # lr_scheduler = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=5, verbose=1)
-
-    # lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-    # initial_learning_rate=1e-2,
-    # decay_steps=10000,
-    # decay_rate=0.9)
-    
     optimizer = Adam()
 
     # Compile the model

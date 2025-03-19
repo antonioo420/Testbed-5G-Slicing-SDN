@@ -3,7 +3,7 @@ import requests
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model, Model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, ReLU
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, ReLU, SimpleRNN
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError
@@ -18,6 +18,7 @@ from plotDataset import plot_accuracy
 import sys
 import os
 import yfinance as yf
+import subprocess, time, re
 
 # OpenDaylight RESTCONF Credentials
 CONTROLLER_IP = "<controller-ip>"
@@ -32,9 +33,9 @@ HOSTNAME = "HOST1"
 BASE_URL = f"http://{CONTROLLER_IP}:8181/restconf/config/network-topology:network-topology/topology/ovsdb:1/node/ovsdb%3A%2F%2F{HOSTNAME}/ovsdb:queues/queue%3A%2F%2F{QUEUE_UUID}/"
 
 # Parameters
-LOOKBACK = 40  # Number of previous data points to consider
+LOOKBACK = 30  # Number of previous data points to consider
 ALPHA = 0.3  # EMA smoothing factor
-N_CLASSES = 3 # youtube, twitch, prime, tiktok, navegacion web
+N_CLASSES = 4 # youtube, twitch, prime, tiktok, navegacion web
 #TRAFFIC_HISTORY = deque(maxlen=LOOKBACK)
 
 # Define LSTM Model
@@ -63,6 +64,33 @@ def build_lstm_model():
     model = Model(inputs=inputs, outputs=[throughput_output, classification_output])
 
     return model
+
+def build_rnn_model():
+    inputs = Input(shape=(LOOKBACK, 1))
+
+    # Shared part
+    x = SimpleRNN(100, return_sequences=True)(inputs)
+    x = Dropout(0.2)(x)
+    x = SimpleRNN(50, return_sequences=True)(x)
+    x = Dropout(0.2)(x)
+    x = SimpleRNN(50, return_sequences=False)(x)
+    x = Dropout(0.5)(x)
+    
+    x = Dense(50)(x)        
+    x = ReLU()(x) 
+    #x = Dense(50)(x)        
+
+    # Output 1: Throughput (regression)
+    throughput_output = Dense(1, name='throughput_output')(x)
+
+    # Output 2: Traffic type (classification)
+    classification_output = Dense(N_CLASSES, activation='softmax', name='classification_output')(x)
+
+    # Final model
+    model = Model(inputs=inputs, outputs=[throughput_output, classification_output])
+
+    return model
+
 
 def normalise_dataset(X, max, min):
     # MinMaxScaler
@@ -119,8 +147,7 @@ def load_split_dataset(input_file, norm = 1):
     y_test_throughput = np.array(y_test_throughput)    
     y_test_class = np.array(y_test_class)
 
-    # Reshape so the LSTM input has the shape (n_samples, time_steps, n_features)
-    # Add an extra dimension for characteristics (in this case, only 'throughput')
+    # Reshape so the LSTM input has the shape (n_samples, time_steps, n_features)    
     x_train = x_train.reshape((x_train.shape[0], x_train.shape[1], 1))
     x_test = x_test.reshape((x_test.shape[0], x_test.shape[1], 1))    
 
@@ -169,15 +196,15 @@ def train_model(x_train, y_train_throughput, y_train_class, model, epochs = 100,
     model.compile(
         optimizer=optimizer,
         loss={
-            'throughput_output': 'mse',  # Mean Squared Error para regresión
-            'classification_output': 'sparse_categorical_crossentropy',  # o 'categorical_crossentropy' si es one-hot
+            'throughput_output': 'mse',  # Mean Squared Error for regression
+            'classification_output': 'sparse_categorical_crossentropy',  # Cross entropy for classification (-log[p(y)])
         },
         metrics={
-            'throughput_output': ['mae'],  # Mean Absolute Error como métrica
-            'classification_output': ['accuracy'],  # Precisión para clasificación
+            'throughput_output': ['mae'],  # Mean Absolute Error as metric for regression
+            'classification_output': ['accuracy'],  # Accuracy as metric for classification
         }
     )
-    model.summary()
+    #model.summary()
     lr_sched = step_decay_schedule(initial_lr=1e-3, decay_factor=0.75, step_size=5)
 
     model.fit(
@@ -207,32 +234,73 @@ def accuracy(x_test, y_test_throughput, y_test_class, model, path='test.png'):
     
     #return rmse, acc
 
-# def predict_real_time(x):            
-#     input_data = np.array(x.reshape(1, LOOKBACK))
-#     prediction = model.predict(input_data)[0][0]
-#     return prediction
+def get_bytes(interface):
+    with open('/proc/net/dev', 'r') as f:
+        data = f.readlines()
+    for line in data:
+        if interface in line:
+            parts = line.split()
+            recv_bytes = int(parts[1])  # Bytes recibidos
+            #sent_bytes = int(parts[9])  # Bytes enviados
+            return recv_bytes
+    return 0, 0
+
+def get_throughput(interface='eth0'):    
+    window = deque(maxlen=LOOKBACK)
+    rx_prev = get_bytes(interface)
+
+    while True:
+        time.sleep(0.5)  # 500 ms
+
+        # Segunda lectura
+        rx_now = get_bytes(interface)
+
+        # Diferencia
+        rx_diff = rx_now - rx_prev
+
+        # Throughput en Mbps
+        rx_kbps = (rx_diff * 8) / 500 / 1000  # *8 (bits) - /500 ms - /1000 Mb
+
+        print(f"Download: {rx_kbps:.2f} Kbps")
+
+        # Actualizar valores anteriores
+        rx_prev = rx_now        
+        
+        print(f"Valor previo a la predicción: {rx_now}")
+
+        window.append(rx_now)                        
+        
+        if len(window) == LOOKBACK:
+            input_data = np.array(window).reshape(1, LOOKBACK, 1)
+            prediction = model.predict(input_data)[0][0]
+            print(f"Predicción: {prediction}")
+            #max_rate = int(prediction * 1.2)  # Buffer factor
+            #update_queue_max_rate(max_rate)                        
     
 if __name__ == "__main__":
-    dataset = sys.argv[1] 
-    option = sys.argv[2]
-    print(os.path.dirname(dataset))
-    print(option)
-        # Load pre-trained model or train from scratch
-    try:    
-        model = load_model("./traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
-        print("----------Modelo cargado--------------")
-    except:
-        model = build_lstm_model()    
-        print("----------Modelo creado--------------")
+    try: 
+        dataset = sys.argv[1] 
+        option = sys.argv[2]
+        print(os.path.dirname(dataset))
+        print(option)
+            # Load pre-trained model or train from scratch
+        try:    
+            model = load_model("./traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
+            print("----------Modelo cargado--------------")
+        except:
+            model = build_lstm_model()    
+            print("----------Modelo creado--------------")
 
-    match option:
-        case '0':
-            x_train, y_train_throughput, y_train_class, x_test, y_test_throughput, y_test_class = load_split_dataset(dataset, norm = 1)   
-            train_model(x_train, y_train_throughput, y_train_class, model, epochs=25, batch_size=32)     
-            accuracy(x_test, y_test_throughput, y_test_class, model)            
-        case '1':
-            x_train, y_train_throughput, y_train_class = load_dataset(dataset, norm = 0)
-            train_model(x_train, y_train_throughput, y_train_class, model, epochs=25, batch_size=32)
-        case '2':
-            x_test, y_test_throughput, y_test_class = load_dataset(dataset, norm = 0)
-            accuracy(x_test, y_test_throughput, y_test_class, model)            
+        match option:
+            case '0':
+                x_train, y_train_throughput, y_train_class, x_test, y_test_throughput, y_test_class = load_split_dataset(dataset, norm = 1)   
+                train_model(x_train, y_train_throughput, y_train_class, model, epochs=25, batch_size=32)     
+                accuracy(x_test, y_test_throughput, y_test_class, model)            
+            case '1':
+                x_train, y_train_throughput, y_train_class = load_dataset(dataset, norm = 0)
+                train_model(x_train, y_train_throughput, y_train_class, model, epochs=25, batch_size=32)
+            case '2':
+                x_test, y_test_throughput, y_test_class = load_dataset(dataset, norm = 0)
+                accuracy(x_test, y_test_throughput, y_test_class, model)        
+    except IndexError:
+        get_throughput('vmbr0')
