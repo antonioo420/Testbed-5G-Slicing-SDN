@@ -1,22 +1,18 @@
 import datetime
 import requests
-import numpy as np
-import tensorflow as tf
+import numpy as npy
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError
 from keras.callbacks import LearningRateScheduler
-from sklearn.preprocessing import MinMaxScaler
 from collections import deque
 import pandas as pd
 from sklearn.metrics import mean_squared_error
-import pdb
 from plotDataset import plot_accuracy
 import sys
 import os
-import yfinance as yf
 
 # OpenDaylight RESTCONF Credentials
 CONTROLLER_IP = "<controller-ip>"

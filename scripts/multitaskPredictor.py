@@ -1,7 +1,6 @@
 import datetime
 import requests
 import numpy as np
-import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model, Model
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, ReLU, SimpleRNN
 from tensorflow.keras.callbacks import ReduceLROnPlateau
