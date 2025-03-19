@@ -272,11 +272,26 @@ def get_throughput(interface, model):
             throughput_pred, class_pred = model.predict(input_data)
 
             throughput = throughput_pred[0]  # Predicción del throughput
-            class_ = np.argmax(class_pred[0])  # Clase con mayor probabilidad
+            class_value = np.argmax(class_pred[0])  # Clase con mayor probabilidad
+
+            class_ = getclass(class_value)
             print(f"Predicción throughput: {throughput}")
             print(f"Predicción clase: {class_}")
             #max_rate = int(prediction * 1.2)  # Buffer factor
             #update_queue_max_rate(max_rate)
+
+def getclass(class_value):
+    match class_value:
+        case 0:
+            return 'youtube'
+        case 1:
+            return 'twitch'
+        case 2:
+            return 'prime'
+        case 3:
+            return 'tiktok'
+        case 4:
+            return 'navegacion web'
 
 if __name__ == "__main__":
     try:
