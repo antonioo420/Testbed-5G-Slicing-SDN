@@ -17,7 +17,6 @@ import pdb
 from plotDataset import plot_accuracy
 import sys
 import os
-import yfinance as yf
 import subprocess, time, re
 
 # OpenDaylight RESTCONF Credentials
