@@ -229,7 +229,7 @@ def accuracy(x_test, y_test_throughput, y_test_class, model, path='test.png'):
     
     print(f"RMSE (Throughput): {rmse:.4f}")
     print(f"Accuracy (Classification): {acc:.4f}")
-    
+
     #return rmse, acc
 
 def get_bytes(interface):
@@ -241,9 +241,9 @@ def get_bytes(interface):
             recv_bytes = int(parts[1])  # Bytes recibidos
             #sent_bytes = int(parts[9])  # Bytes enviados
             return recv_bytes
-    return 0, 0
+    return 0
 
-def get_throughput(interface='eth0'):    
+def get_throughput(interface, model):
     window = deque(maxlen=LOOKBACK)
     rx_prev = get_bytes(interface)
 
@@ -257,48 +257,49 @@ def get_throughput(interface='eth0'):
         rx_diff = rx_now - rx_prev
 
         # Throughput en Mbps
-        rx_kbps = (rx_diff * 8) / 500 / 1000  # *8 (bits) - /500 ms - /1000 Mb
+        rx_mbps = (rx_diff * 8) / 500 / 1000  # *8 (bits) - /500 ms - /1000 Mb
 
-        print(f"Download: {rx_kbps:.2f} Kbps")
+        print(f"Valor previo a la prediccion: {rx_mbps:.2f} Mbps")
 
         # Actualizar valores anteriores
-        rx_prev = rx_now        
-        
-        print(f"Valor previo a la predicción: {rx_now}")
+        rx_prev = rx_now
 
-        window.append(rx_now)                        
-        
+        window.append(rx_mbps)
+
         if len(window) == LOOKBACK:
             input_data = np.array(window).reshape(1, LOOKBACK, 1)
-            prediction = model.predict(input_data)[0][0]
-            print(f"Predicción: {prediction}")
+            #prediction = model.predict(input_data)[0][0]
+            throughput_pred, class_pred = model.predict(input_data)
+
+            throughput = throughput_pred[0]  # Predicción del throughput
+            class_ = np.argmax(class_pred[0])  # Clase con mayor probabilidad
+            print(f"Predicción throughput: {throughput}")
+            print(f"Predicción clase: {class_}")
             #max_rate = int(prediction * 1.2)  # Buffer factor
-            #update_queue_max_rate(max_rate)                        
-    
+            #update_queue_max_rate(max_rate)
+
 if __name__ == "__main__":
-    try: 
-        dataset = sys.argv[1] 
+    try:
+        model = load_model("./traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
+        print("----------Modelo cargado--------------")
+    except:
+        model = build_lstm_model()
+        print("----------Modelo creado--------------")
+
+    try:
+        dataset = sys.argv[1]
         option = sys.argv[2]
-        print(os.path.dirname(dataset))
-        print(option)
-            # Load pre-trained model or train from scratch
-        try:    
-            model = load_model("./traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
-            print("----------Modelo cargado--------------")
-        except:
-            model = build_lstm_model()    
-            print("----------Modelo creado--------------")
 
         match option:
             case '0':
-                x_train, y_train_throughput, y_train_class, x_test, y_test_throughput, y_test_class = load_split_dataset(dataset, norm = 1)   
-                train_model(x_train, y_train_throughput, y_train_class, model, epochs=25, batch_size=32)     
-                accuracy(x_test, y_test_throughput, y_test_class, model)            
+                x_train, y_train_throughput, y_train_class, x_test, y_test_throughput, y_test_class = load_split_dataset(dataset, norm = 1)
+                train_model(x_train, y_train_throughput, y_train_class, model, epochs=25, batch_size=32)
+                accuracy(x_test, y_test_throughput, y_test_class, model)
             case '1':
                 x_train, y_train_throughput, y_train_class = load_dataset(dataset, norm = 0)
                 train_model(x_train, y_train_throughput, y_train_class, model, epochs=25, batch_size=32)
             case '2':
                 x_test, y_test_throughput, y_test_class = load_dataset(dataset, norm = 0)
-                accuracy(x_test, y_test_throughput, y_test_class, model)        
+                accuracy(x_test, y_test_throughput, y_test_class, model)
     except IndexError:
-        get_throughput('vmbr0')
+        get_throughput('ens23', model)
