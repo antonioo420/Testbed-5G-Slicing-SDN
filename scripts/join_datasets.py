@@ -19,7 +19,7 @@ csv_files = []
 for subdir, dir, files in os.walk(root_dir):
     for file in files:        
         filename = os.fsdecode(file)
-        if filename.endswith(".csv") and filename != 'total_dataset.csv':
+        if filename.endswith(".csv") and filename != 'total_dataset.csv' and filename != 'prime_yt_twitch.csv':
             csv_files.append(os.path.join(subdir, file))
 
 random.shuffle(csv_files)

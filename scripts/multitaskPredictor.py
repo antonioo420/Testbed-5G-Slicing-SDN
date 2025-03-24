@@ -2,7 +2,7 @@ import datetime
 import requests
 import numpy as np
 from tensorflow.keras.models import Sequential, load_model, Model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, ReLU, SimpleRNN
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input, ReLU, SimpleRNN, GRU
 from tensorflow.keras.callbacks import ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError
@@ -89,6 +89,31 @@ def build_rnn_model():
 
     return model
 
+def build_gru_model():
+    inputs = Input(shape=(LOOKBACK, 1))
+
+    # Shared part
+    x = GRU(100, return_sequences=True)(inputs)
+    x = Dropout(0.2)(x)
+    x = GRU(50, return_sequences=True)(x)
+    x = Dropout(0.2)(x)
+    x = GRU(50, return_sequences=False)(x)
+    x = Dropout(0.5)(x)
+    
+    x = Dense(50)(x)        
+    x = ReLU()(x) 
+    #x = Dense(50)(x)        
+
+    # Output 1: Throughput (regression)
+    throughput_output = Dense(1, name='throughput_output')(x)
+
+    # Output 2: Traffic type (classification)
+    classification_output = Dense(N_CLASSES, activation='softmax', name='classification_output')(x)
+
+    # Final model
+    model = Model(inputs=inputs, outputs=[throughput_output, classification_output])
+
+    return model
 
 def normalise_dataset(X, max, min):
     # MinMaxScaler
@@ -187,7 +212,7 @@ def step_decay_schedule(initial_lr=1e-3, decay_factor=0.75, step_size=5):
     
     return LearningRateScheduler(schedule)
 
-def train_model(x_train, y_train_throughput, y_train_class, model, epochs = 100, batch_size = 32, path = './traffic_predictor.h5'):
+def train_model(x_train, y_train_throughput, y_train_class, model, epochs = 100, batch_size = 32, path = './traffic_predictor_nodropout.h5'):
     optimizer = Adam()
 
     # Compile the model
@@ -300,7 +325,7 @@ if __name__ == "__main__":
     except:
         model = build_lstm_model()
         print("----------Modelo creado--------------")
-
+    print(model.summary())
     try:
         dataset = sys.argv[1]
         option = sys.argv[2]
