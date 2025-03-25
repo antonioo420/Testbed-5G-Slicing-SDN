@@ -257,54 +257,6 @@ def accuracy(x_test, y_test_throughput, y_test_class, model, path='test.png'):
 
     #return rmse, acc
 
-def get_bytes(interface):
-    with open('/proc/net/dev', 'r') as f:
-        data = f.readlines()
-    for line in data:
-        if interface in line:
-            parts = line.split()
-            recv_bytes = int(parts[1])  # Bytes recibidos
-            #sent_bytes = int(parts[9])  # Bytes enviados
-            return recv_bytes
-    return 0
-
-def get_throughput(interface, model):
-    window = deque(maxlen=LOOKBACK)
-    rx_prev = get_bytes(interface)
-
-    while True:
-        time.sleep(0.5)  # 500 ms
-
-        # Segunda lectura
-        rx_now = get_bytes(interface)
-
-        # Diferencia
-        rx_diff = rx_now - rx_prev
-
-        # Throughput en Mbps
-        rx_mbps = (rx_diff * 8) / 500 / 1000  # *8 (bits) - /500 ms - /1000 Mb
-
-        print(f"Valor previo a la prediccion: {rx_mbps:.2f} Mbps")
-
-        # Actualizar valores anteriores
-        rx_prev = rx_now
-
-        window.append(rx_mbps)
-
-        if len(window) == LOOKBACK:
-            input_data = np.array(window).reshape(1, LOOKBACK, 1)
-            #prediction = model.predict(input_data)[0][0]
-            throughput_pred, class_pred = model.predict(input_data)
-
-            throughput = throughput_pred[0]  # Predicción del throughput
-            class_value = np.argmax(class_pred[0])  # Clase con mayor probabilidad
-
-            class_ = getclass(class_value)
-            print(f"Predicción throughput: {throughput}")
-            print(f"Predicción clase: {class_}")
-            #max_rate = int(prediction * 1.2)  # Buffer factor
-            #update_queue_max_rate(max_rate)
-
 def getclass(class_value):
     match class_value:
         case 0:
@@ -318,14 +270,53 @@ def getclass(class_value):
         case 4:
             return 'navegacion web'
 
+# Hasta 300 ms de frecuencia de actualización
+def get_nload_throughput(interface, model):
+    # Ejecuta nload en modo no interactivo con actualización cada 500ms y utiliza Mb/s como unidad
+    # nload -u m -m -t 500 <interface>
+    command = ["nload", "-u", "m", "-m", "-t", "500", interface]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    
+    window = deque(maxlen=LOOKBACK)
+    try:
+        for line in process.stdout:
+            if not line:
+                break
+
+            # Buscar valores de Curr:
+            incoming_match = re.search(r"Curr:\s+([\d.]+) (\w+)", line)            
+            if incoming_match:                
+                incoming_value = incoming_match.group(1)
+                print(incoming_value)
+
+                window.append(float(incoming_value))
+
+                if len(window) == LOOKBACK:
+                    input_data = np.array(window).reshape(1, LOOKBACK, 1)
+                    throughput_pred, class_pred = model.predict(input_data)
+
+                    throughput = throughput_pred[0]  # Predicción del throughput
+                    class_value = np.argmax(class_pred[0])  # Clase con mayor probabilidad
+
+                    class_ = getclass(class_value)
+                    print(f"Predicción throughput: {throughput[0]:.2f}")
+                    print(f"Predicción clase: {class_}")
+                    #max_rate = int(prediction * 1.2)  # Buffer factor
+                    #update_queue_max_rate(max_rate)
+
+    except KeyboardInterrupt:
+        # Captura la interrupción de teclado (Ctrl+C)
+        print(f"\nInterrupción detectada")        
+        process.terminate()
+
 if __name__ == "__main__":
     try:
-        model = load_model("./traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
+        model = load_model("./zprueba_look30_4clases/traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
         print("----------Modelo cargado--------------")
     except:
         model = build_lstm_model()
         print("----------Modelo creado--------------")
-    print(model.summary())
+    #print(model.summary())
     try:
         dataset = sys.argv[1]
         option = sys.argv[2]
@@ -342,4 +333,4 @@ if __name__ == "__main__":
                 x_test, y_test_throughput, y_test_class = load_dataset(dataset, norm = 0)
                 accuracy(x_test, y_test_throughput, y_test_class, model)
     except IndexError:
-        get_throughput('ens23', model)
+        get_nload_throughput('eno8303', model)
