@@ -1,46 +1,90 @@
+import time
 import pandas as pd
-from bitrate_utils import calculate_throughput
-from dotenv import load_dotenv
-import os
+import subprocess
+import re
 
-load_dotenv()
-URL_STATS_1 = os.getenv('ODL_STATS1_URL')
-URL_QUEUE_1 = os.getenv('ODL_QUEUE1_URL')
-QUEUE_1 = os.getenv('QUEUE1_ID')
+# Limitado a 1 segundo de muestreo
+def get_bytes_dev(interface):
+    with open('/proc/net/dev', 'r') as f:
+        data = f.readlines()
+    for line in data:
+        if interface in line:
+            parts = line.split()
+            recv_bytes = int(parts[1])  # Bytes recibidos
+            #sent_bytes = int(parts[9])  # Bytes enviados
+            return recv_bytes
+    return 0
 
-# Update parameters
-INTERVAL = 5
+# Limitado a 1 segundo de muestreo
+def get_bytes_sys_class(interface):
+    with open(f"/sys/class/net/{interface}/statistics/rx_bytes", 'r') as f:
+        data = f.readlines()
+        cleaned_data = int(data[0].strip())
+        return cleaned_data
 
-import pandas as pd
-
-def createDataset(iterations):    
-    df = pd.DataFrame(columns=['throughput', 'timestamp'])
-    time = 0
-
+# Limitado a 1 segundo de muestreo
+def get_throughput(interface):    
+    dataset = pd.DataFrame(columns=['throughput'])
+    rx_prev = get_bytes_dev(interface)
+    
     try:
-        for i in range(iterations):
-            # Calcular throughput
-            throughput = calculate_throughput(interval=INTERVAL, urlstats=URL_STATS_1)
+        while True:
+            time.sleep(1)
 
-            # Crear nueva fila
-            nueva_fila = pd.DataFrame([[throughput, time]], columns=['throughput', 'timestamp'])
+            # Segunda lectura
+            rx_now = get_bytes_dev(interface)
 
-            print("Valores tomados: ", throughput, time)
+            # Diferencia
+            rx_diff = rx_now - rx_prev
 
-            # Concatenar nueva fila
-            df = pd.concat([df, nueva_fila.dropna(axis=1)], ignore_index=True)
-            time += INTERVAL
+            # Throughput en Mbps
+            rx_mbps = (rx_diff * 8) / 1000000  # *8 (bits) - /500 ms - /1000 Mb        
+            
+            print(rx_mbps)
+
+            nueva_fila = pd.DataFrame([rx_mbps], columns=['throughput'])
+
+            dataset = pd.concat([dataset, nueva_fila.dropna(axis=1)], ignore_index=True)
+
+            # Actualizar valores anteriores
+            rx_prev = rx_now
 
     except KeyboardInterrupt:
+        rows = len(dataset.index)
         # Captura la interrupción de teclado (Ctrl+C)
-        print("\nInterrupción detectada. Guardando los datos en 'dataset.csv'...")
-        df.to_csv('dataset.csv', index=False)  # Guardar DataFrame en CSV
-        print("Datos guardados exitosamente en 'dataset.csv'.")
+        print(f"\nInterrupción detectada. Guardando los datos en 'dataset{rows}.csv'...")        
+        dataset.to_csv(f"dataset{rows}.csv", index=False)  # Guardar DataFrame en CSV
+        print(f"Datos guardados exitosamente en 'dataset{rows}.csv'.")
 
-    else:
-        # Si no hubo interrupción, guarda el archivo después de que termine el bucle
-        df.to_csv('dataset.csv', index=False)
-        print("Datos guardados exitosamente en 'dataset.csv'.")
+# Hasta 300 ms de frecuencia de actualización
+def get_nload_throughput(interface):
+    # Ejecuta nload en modo no interactivo con actualización cada 500ms y utiliza Mb/s como unidad
+    # nload -u m -m -t 500 <interface>
+    command = ["nload", "-u", "m", "-m", "-t", "500", interface]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    
+    dataset = pd.DataFrame(columns=['throughput'])
+    try:
+        for line in process.stdout:
+            if not line:
+                break
 
-iterations = int(input("Introduce el número de valores que quieres tomar: "))
-createDataset(iterations)
+            # Buscar valores de Curr:
+            incoming_match = re.search(r"Curr:\s+([\d.]+) (\w+)", line)            
+            if incoming_match:                
+                incoming_value = incoming_match.group(1)
+                nueva_fila = pd.DataFrame([incoming_value], columns=['throughput'])
+                dataset = pd.concat([dataset, nueva_fila.dropna(axis=1)], ignore_index=True)
+                print(incoming_value)
+
+    except KeyboardInterrupt:
+        rows = len(dataset.index)
+        # Captura la interrupción de teclado (Ctrl+C)
+        print(f"\nInterrupción detectada. Guardando los datos en 'dataset{rows}.csv'...")        
+        dataset.to_csv(f"dataset{rows}.csv", index=False) 
+        print(f"Datos guardados exitosamente en 'dataset{rows}.csv'.")
+        process.terminate()
+    
+
+if __name__ == "__main__":
+    get_nload_throughput('eno8303')
