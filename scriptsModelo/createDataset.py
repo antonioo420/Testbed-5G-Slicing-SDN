@@ -87,4 +87,4 @@ def get_nload_throughput(interface):
     
 
 if __name__ == "__main__":
-    get_nload_throughput('eno8303')
+    get_nload_throughput('ens23')

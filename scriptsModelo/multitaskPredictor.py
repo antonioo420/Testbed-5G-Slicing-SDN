@@ -311,7 +311,7 @@ def get_nload_throughput(interface, model):
 
 if __name__ == "__main__":
     try:
-        model = load_model("./zprueba_look30_4clases/traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
+        model = load_model("./traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
         print("----------Modelo cargado--------------")
     except:
         model = build_lstm_model()
@@ -333,4 +333,4 @@ if __name__ == "__main__":
                 x_test, y_test_throughput, y_test_class = load_dataset(dataset, norm = 0)
                 accuracy(x_test, y_test_throughput, y_test_class, model)
     except IndexError:
-        get_nload_throughput('eno8303', model)
+        get_nload_throughput('ens23', model)
