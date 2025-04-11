@@ -50,6 +50,7 @@ class SimpleMonitor(app_manager.RyuApp):
             self.set_ovsdb_addr()
             time.sleep(1)
             self.create_queues()
+            #self.get_queues()
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
@@ -75,14 +76,14 @@ class SimpleMonitor(app_manager.RyuApp):
 
         # in_port=9 → queue=10 -> actions=normal
         match1 = parser.OFPMatch(in_port=9)
-        actions1 = [parser.OFPActionSetQueue(10), parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
+        actions1 = [parser.OFPActionSetQueue(0), parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
         inst1 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions1)]
         mod1 = parser.OFPFlowMod(datapath=datapath, priority=200, match=match1, instructions=inst1)
         datapath.send_msg(mod1)
 
         # in_port=4 → queue=20 -> actions=normal
         match2 = parser.OFPMatch(in_port=4)
-        actions2 = [parser.OFPActionSetQueue(20), parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
+        actions2 = [parser.OFPActionSetQueue(1), parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
         inst2 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions2)]
         mod2 = parser.OFPFlowMod(datapath=datapath, priority=200, match=match2, instructions=inst2)
         datapath.send_msg(mod2)
@@ -104,6 +105,49 @@ class SimpleMonitor(app_manager.RyuApp):
             self.logger.error(f"Exception while requesting to REST API: {e}")
             
     def create_queues(self):
+        url = "http://localhost:8080/qos/queue/0000bc24113d8d35" 
+        
+        queues = {
+            "port_name": "enp2s1",
+            "type": "linux-htb",
+            "queues": [
+                #[{"queue": "10"}, 
+                {"max_rate": "90000000"},
+                
+               # [#{"queue": "20"}, 
+                {"max_rate": "20000000"}
+            ]
+        }
+        headers = {"Content-Type": "application/json"}
+        data = json.dumps(queues)
+        try:
+            r = requests.post(url, data=data, headers=headers)
+            #print(r.text)
+            response = json.loads(r.text)
+            if r.status_code == 200 and response[0]["command_result"]["result"] == "success":
+                self.logger.info(f"QoS queues created successfully")
+            else:
+                self.logger.error(f"Error creating QoS: {r.text}")
+        except Exception as e:
+            self.logger.error(f"Exception while requesting to REST API: {e}")
+
+    def get_queues(self):
+        url = "http://localhost:8080/qos/queue/0000bc24113d8d35" 
+        
+        headers = {"Content-Type": "application/json"}
+        try:
+            r = requests.get(url, headers=headers)
+            #print(r.text)
+            response = json.loads(r.text)
+            if r.status_code == 200 :
+                print(r.text)
+                self.logger.info(f"QoS queues created successfully")
+            else:
+                self.logger.error(f"Error creating QoS: {r.text}")
+        except Exception as e:
+            self.logger.error(f"Exception while requesting to REST API: {e}")
+            
+    def update_queues(self):
         url = "http://localhost:8080/qos/queue/0000bc24113d8d35" 
         
         queues = {
