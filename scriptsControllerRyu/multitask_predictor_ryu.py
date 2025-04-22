@@ -32,7 +32,7 @@ class SimpleMonitor(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super(SimpleMonitor, self).__init__(*args, **kwargs)
-        self.model = load_model("./traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
+        self.model = load_model("/home/lab/traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
         print("Modelo cargado")
         self.datapaths = {}
         self.prev_rx_bytes = {}  # Almacena los RX anteriores
@@ -50,7 +50,6 @@ class SimpleMonitor(app_manager.RyuApp):
             self.set_ovsdb_addr()
             time.sleep(1)
             self.create_queues()
-            #self.get_queues()
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
@@ -111,18 +110,14 @@ class SimpleMonitor(app_manager.RyuApp):
             "port_name": "enp2s1",
             "type": "linux-htb",
             "queues": [
-                #[{"queue": "10"}, 
-                {"max_rate": "90000000"},
-                
-               # [#{"queue": "20"}, 
-                {"max_rate": "20000000"}
+                {"max_rate": "90000000"},   # Queue 0
+                {"max_rate": "20000000"}    # Queue 1
             ]
         }
         headers = {"Content-Type": "application/json"}
         data = json.dumps(queues)
         try:
             r = requests.post(url, data=data, headers=headers)
-            #print(r.text)
             response = json.loads(r.text)
             if r.status_code == 200 and response[0]["command_result"]["result"] == "success":
                 self.logger.info(f"QoS queues created successfully")
@@ -137,7 +132,6 @@ class SimpleMonitor(app_manager.RyuApp):
         headers = {"Content-Type": "application/json"}
         try:
             r = requests.get(url, headers=headers)
-            #print(r.text)
             response = json.loads(r.text)
             if r.status_code == 200 :
                 print(r.text)
@@ -147,27 +141,27 @@ class SimpleMonitor(app_manager.RyuApp):
         except Exception as e:
             self.logger.error(f"Exception while requesting to REST API: {e}")
             
-    def update_queues(self):
+    def update_queues(self, rate0):
         url = "http://localhost:8080/qos/queue/0000bc24113d8d35" 
         
         queues = {
             "port_name": "enp2s1",
             "type": "linux-htb",
             "queues": [
-                {"max_rate": "500000"},
-                {"min_rate": "800000"}
+                {"max_rate": str(rate0)}    # Queue 0
+               # {"max_rate": str(rate1)}   # Queue 1
             ]
         }
         headers = {"Content-Type": "application/json"}
         data = json.dumps(queues)
         try:
             r = requests.post(url, data=data, headers=headers)
-            #print(r.text)
             response = json.loads(r.text)
-            if r.status_code == 200 and response[0]["command_result"]["result"] == "success":
-                self.logger.info(f"QoS queues created successfully")
+            
+            if r.status_code == 200:
+                self.logger.info(f"QoS queues updated successfully")
             else:
-                self.logger.error(f"Error creating QoS: {r.text}")
+                self.logger.error(f"Error updating QoS: {r.text}")
         except Exception as e:
             self.logger.error(f"Exception while requesting to REST API: {e}")
                 
@@ -197,8 +191,6 @@ class SimpleMonitor(app_manager.RyuApp):
         elif class_value == 4:
             return 'navegacion web'
 
-    
-"""
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
         #  Receives and procceses ports stats
@@ -230,6 +222,9 @@ class SimpleMonitor(app_manager.RyuApp):
                         class_ = self.getclass(class_value)
                         self.logger.info(f"Predicción throughput: {throughput[0]:.2f}")
                         print(f"Predicción clase: {class_}")
-                        #max_rate = int(prediction * 1.2)  # Buffer factor
-                        #update_queue_max_rate(max_rate)
-        self.prev_rx_bytes = now_rx_bytes"""
+                        max_rate = int(throughput * 1.2)  # Buffer factor
+                        self.update_queues(max_rate)
+        self.prev_rx_bytes = now_rx_bytes
+
+   # def qos_policy(prediction):
+   #     if prediction >= 
