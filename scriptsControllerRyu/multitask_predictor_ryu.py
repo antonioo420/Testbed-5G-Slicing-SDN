@@ -4,8 +4,10 @@ from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
+from ryu.lib.packet import packet
+from ryu.lib.packet import ethernet, ipv4, tcp, udp
+from ryu.lib import dpid as dpid_lib
 
-import datetime
 import requests
 import numpy as np
 from tensorflow.keras.models import Sequential, load_model, Model
@@ -16,46 +18,58 @@ from tensorflow.keras.losses import MeanSquaredError
 from keras.callbacks import LearningRateScheduler
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score
-from collections import deque
+from collections import defaultdict, deque
 import pandas as pd
-from sklearn.metrics import mean_squared_error
-import pdb
-import sys
-import os
-import subprocess, time, re
+from sklearn.metrics import mean_squared_error   
+import time
 import json
+from scapy.all import IP as scapy_IP, raw
+import threading
+import logging
+import struct
 
 LOOKBACK = 30
-window = deque(maxlen=LOOKBACK)
+LAST_PRED = 10
+#window = deque([0]* 30,maxlen=LOOKBACK)
+
 class SimpleMonitor(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         super(SimpleMonitor, self).__init__(*args, **kwargs)
         self.model = load_model("/home/lab/traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
-        print("Modelo cargado")
-        self.datapaths = {}
-        self.prev_rx_bytes = {}  # Almacena los RX anteriores
-        self.monitor_thread = hub.spawn(self._monitor)
-
+        self.logger.info("Modelo cargado")
+        self.datapath = None
+        self.window = defaultdict(lambda: deque(maxlen=LOOKBACK))
+        self.ues = set()
+        self.dpid_str = {}
+        self.ip_map = {}
+        self.last_pred = defaultdict(lambda: deque(maxlen=LAST_PRED))
+        #self.monitor_throughput(0.5)
+        logging.getLogger('ryu.controller.ofp_handler').setLevel(logging.WARNING)
+        
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _state_change_handler(self, ev):
-        """ Handles state changes of the switch """
+        """ If switch connects creates flows and queues. If it disconnects deletes datapath """
         datapath = ev.datapath
         if ev.state == MAIN_DISPATCHER:
-            self.datapaths[datapath.id] = datapath
+            #self.datapaths[datapath.id] = datapath
+            self.datapath = datapath
+            self.dpid_str = dpid_lib.dpid_to_str(datapath.id)
             self.add_default_flow(datapath)
-            self.add_queue_flows(datapath)
+            self.add_default_queue_flows(datapath)
             time.sleep(1)
-            self.set_ovsdb_addr()
+            self.set_ovsdb_addr(self.dpid_str)
             time.sleep(1)
-            self.create_queues()
+            self.create_queues(self.dpid_str, 50000000, 20000000)
+            self.send_to_controller_from_port(datapath, 9)
+            self.monitor_thread = hub.spawn(self._monitor)
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
 
     def add_default_flow(self, datapath):
-        """Add flow "actions=normal" to the switch using OpenFlow """
+        """Adds flow "actions=normal" to the switch using OpenFlow """
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -69,18 +83,19 @@ class SimpleMonitor(app_manager.RyuApp):
 
         self.logger.info("Actions normal flow installed")
 
-    def add_queue_flows(self, datapath):
+    def add_default_queue_flows(self, datapath):
+        """ Adds queue flows for UPF1 and UPF2 downlink ports"""
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
-        # in_port=9 → queue=10 -> actions=normal
+        # in_port=9 → queue=0 -> actions=normal
         match1 = parser.OFPMatch(in_port=9)
         actions1 = [parser.OFPActionSetQueue(0), parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
         inst1 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions1)]
         mod1 = parser.OFPFlowMod(datapath=datapath, priority=200, match=match1, instructions=inst1)
         datapath.send_msg(mod1)
 
-        # in_port=4 → queue=20 -> actions=normal
+        # in_port=4 → queue=1 -> actions=normal
         match2 = parser.OFPMatch(in_port=4)
         actions2 = [parser.OFPActionSetQueue(1), parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
         inst2 = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions2)]
@@ -89,10 +104,38 @@ class SimpleMonitor(app_manager.RyuApp):
 
         self.logger.info("Queue flows installed: in_port 9 -> Q10, in_port 4 -> Q20")
 
-    def set_ovsdb_addr(self):
-        url = "http://localhost:8080/v1.0/conf/switches/0000bc24113d8d35/ovsdb_addr"
 
-        data = json.dumps("tcp:127.0.0.1:6632")
+    def add_flow(self, datapath, match, actions):
+        ofp = datapath.ofproto
+        parser = datapath.ofproto_parser
+        inst = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+        mod = parser.OFPFlowMod(datapath=datapath,
+                                priority=200,
+                                match=match,
+                                instructions=inst)
+        datapath.send_msg(mod)
+
+    def send_to_controller_from_port(self, datapath, port_no):
+        """ Adds flow which sends all packets from the switch port given to the controller """
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        match = parser.OFPMatch(in_port=port_no)
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                           ofproto.OFPCML_NO_BUFFER)]
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+
+        mod = parser.OFPFlowMod(datapath=datapath,
+                                priority=200,
+                                match=match,
+                                instructions=inst)
+        datapath.send_msg(mod)
+        
+    def set_ovsdb_addr(self, dpid):
+        """ Sets OVSDB address"""
+        url = "http://localhost:8080/v1.0/conf/switches/"+dpid+"/ovsdb_addr"
+
+        data = json.dumps("tcp:192.168.230.5:6632")
         headers = {"Content-Type": "application/json"}
         try:
             r = requests.put(url, data=data, headers=headers)
@@ -102,16 +145,22 @@ class SimpleMonitor(app_manager.RyuApp):
                 self.logger.error(f"Error setting OVSDB_ADDR")
         except Exception as e:
             self.logger.error(f"Exception while requesting to REST API: {e}")
-            
-    def create_queues(self):
-        url = "http://localhost:8080/qos/queue/0000bc24113d8d35" 
+
+    # TODO: Parametrizar port_name
+    def create_queues(self, dpid, rate0, rate1):
+        """ Creates queues """
+        url = "http://localhost:8080/qos/queue/"+dpid 
         
         queues = {
             "port_name": "enp2s1",
             "type": "linux-htb",
             "queues": [
-                {"max_rate": "90000000"},   # Queue 0
-                {"max_rate": "20000000"}    # Queue 1
+                {"max_rate": str(rate0)},   # Queue 0
+                {"max_rate": str(rate1)},    # Queue 1
+                {"max_rate": str(10000000)},   # Queue 2
+                {"max_rate": str(20000000)},   # Queue 3
+                {"max_rate": str(10000000)},   # Queue 4
+                {"max_rate": str(10000000)}   # Queue 5
             ]
         }
         headers = {"Content-Type": "application/json"}
@@ -126,37 +175,38 @@ class SimpleMonitor(app_manager.RyuApp):
         except Exception as e:
             self.logger.error(f"Exception while requesting to REST API: {e}")
 
-    def get_queues(self):
-        url = "http://localhost:8080/qos/queue/0000bc24113d8d35" 
+    def get_queues(self, dpid):
+        """ Returns queues of the switch"""
+        url = "http://localhost:8080/qos/queue/"+dpid 
         
         headers = {"Content-Type": "application/json"}
         try:
             r = requests.get(url, headers=headers)
             response = json.loads(r.text)
             if r.status_code == 200 :
-                print(r.text)
-                self.logger.info(f"QoS queues created successfully")
+                return response
             else:
-                self.logger.error(f"Error creating QoS: {r.text}")
+                self.logger.error(f"Error getting QoS: {r.text}")
         except Exception as e:
             self.logger.error(f"Exception while requesting to REST API: {e}")
             
-    def update_queues(self, rate0):
-        url = "http://localhost:8080/qos/queue/0000bc24113d8d35" 
+    def update_queues(self, dpid, rate0):
+        """ Updates queues with a given rate """
+        url = "http://localhost:8080/qos/queue/"+dpid 
         
         queues = {
             "port_name": "enp2s1",
             "type": "linux-htb",
             "queues": [
                 {"max_rate": str(rate0)}    # Queue 0
-               # {"max_rate": str(rate1)}   # Queue 1
-            ]
+                #{"max_rate": str(rate1)}   # Queue 1
+                ]
         }
         headers = {"Content-Type": "application/json"}
         data = json.dumps(queues)
         try:
             r = requests.post(url, data=data, headers=headers)
-            response = json.loads(r.text)
+            json.loads(r.text)
             
             if r.status_code == 200:
                 self.logger.info(f"QoS queues updated successfully")
@@ -168,9 +218,9 @@ class SimpleMonitor(app_manager.RyuApp):
     def _monitor(self):
         """ Sends stats request every 0.5 seconds """
         while True:
-            for dp in self.datapaths.values():
-                self._request_stats(dp)
-            hub.sleep(0.5)  # Intervalo de monitoreo
+            #for dp in self.datapaths.values():
+            self._request_stats(self.datapath)
+            hub.sleep(0.5)  
 
     def _request_stats(self, datapath):
         """ Requests stats of switch ports """
@@ -179,7 +229,7 @@ class SimpleMonitor(app_manager.RyuApp):
         req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
         datapath.send_msg(req)
 
-    def getclass(self, class_value):
+    def get_class(self, class_value):
         if class_value == 0:
             return 'youtube'
         elif class_value == 1:
@@ -188,43 +238,138 @@ class SimpleMonitor(app_manager.RyuApp):
             return 'prime'
         elif class_value == 3:
             return 'tiktok'
-        elif class_value == 4:
-            return 'navegacion web'
-
+    
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
-        #  Receives and procceses ports stats
+        # Receives and procceses ports stats 
         body = ev.msg.body
         now_rx_bytes = {}
 
         for stat in sorted(body, key=lambda x: x.port_no):
             port = stat.port_no
             now_rx_bytes[port] = stat.rx_bytes
-
+            
             if port == 9:
-                if port in self.prev_rx_bytes:
-
+                for ip in self.ip_map:
                     # Downlink throughput
-                    rx_diff = stat.rx_bytes - self.prev_rx_bytes[port]
-                    throughput_rx = (rx_diff * 8 * 2) / 1000000 # (Mbps)
+                    throughput = (int(self.ip_map[ip]['bytes']) * 8) / 1000000 / 0.5  #Mbps
+                    self.logger.info("%s throughput: %.2f Mbps",ip, throughput)
+                    self.ip_map[ip]['bytes'] = 0
+                    
+                    self.window[ip].append(float(throughput))
 
-                    self.logger.info(f'Port {port}: RX {throughput_rx:.2f} Mbps')
-
-                    window.append(float(throughput_rx))
-
-                    if len(window) == LOOKBACK:
-                        input_data = np.array(window).reshape(1, LOOKBACK, 1)
+                    if len(self.window[ip]) == LOOKBACK:
+                        aux_window = self.window[ip]
+                        input_data = np.array(aux_window).reshape(1, LOOKBACK, 1)
                         throughput_pred, class_pred = self.model.predict(input_data)
 
-                        throughput = throughput_pred[0]  # Throughput prediction
+                        throughput = throughput_pred[0][0]  # Throughput prediction
                         class_value = np.argmax(class_pred[0])  # Class prediction
 
-                        class_ = self.getclass(class_value)
-                        self.logger.info(f"Predicción throughput: {throughput[0]:.2f}")
-                        print(f"Predicción clase: {class_}")
-                        max_rate = int(throughput * 1.2)  # Buffer factor
-                        self.update_queues(max_rate)
-        self.prev_rx_bytes = now_rx_bytes
+                        class_ = self.get_class(class_value)
+                        self.logger.info(f"%s throughput prediction: {throughput:.2f}", ip)
+                        self.logger.info(f"%s class prediction: {class_}", ip) 
 
-   # def qos_policy(prediction):
-   #     if prediction >= 
+                        self.last_pred[ip].append(class_value)
+                        if len(self.last_pred[ip]) == LAST_PRED:
+                            max_class = max(set(self.last_pred[ip]), key=self.last_pred[ip].count)
+                            self.add_service_queue_flow(self.datapath, self.ip_map[ip]['tun_id'], port, max_class+2)
+                            self.last_pred[ip].clear()
+                            
+                        #self.qos_policy(throughput)
+                        print("\n")
+        self.prev_rx_bytes = now_rx_bytes
+    
+
+    def qos_policy(self, prediction):
+        """ Policy to establish the new max_rate of the queues """
+        response_queues = self.get_queues(self.dpid_str)
+        curr_max_rate = int(response_queues[0]["command_result"]["details"]["enp2s1"]["0"]["config"]["max-rate"])
+        prediction = prediction * 1000000
+        print(prediction, curr_max_rate)
+        if prediction > curr_max_rate: 
+            max_rate = int(prediction)
+            self.update_queues(self.dpid_str, max_rate)
+        elif curr_max_rate != 10000000:
+            self.update_queues(self.dpid_str, 10000000) # 10 Mbps
+
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def _get_inner_ip(self, ev):
+        """ Parses the raw packets coming from the switch to get the UEs IP """
+        msg = ev.msg
+        #dp = msg.datapath
+        #port = msg.match['in_port']
+
+        # Parse the raw packet
+        pkt = packet.Packet(msg.data)
+        pkt.get_protocol(ethernet.ethernet)
+        ip = pkt.get_protocol(ipv4.ipv4)
+        udp_pkt = pkt.get_protocol(udp.udp)
+    
+        if ip and udp_pkt and udp_pkt.dst_port == 2152:
+            #self.logger.info("GTP packet detected from %s", ip.src)
+
+            # Calc UDP payload offset 
+            eth_length = 14  # Ethernet header is always 14 bytes
+            ip_length = (ip.header_length) * 4
+            udp_length = 8  # UDP header is 8 bytes
+
+            gtp_offset = eth_length + ip_length + udp_length
+            gtp_payload = msg.data[gtp_offset:]
+            # GTP header is 16 bytes
+            if len(gtp_payload) > 16:
+                try:
+                    gtp_header = gtp_payload[:16]
+                    # tunnel_id
+                    teid = struct.unpack_from("!I", gtp_header, 4)[0]
+                    
+                    ip_inner = scapy_IP(gtp_payload[16:])
+    
+                    #UEs IP list
+                    if ip_inner.dst not in self.ues:
+                        self.ues.add(ip_inner.dst)
+
+                    # [IP] {bytes, tun_uid} map    
+                    if ip_inner.dst in self.ip_map:
+                        self.ip_map[ip_inner.dst]['bytes'] += len(msg.data) # Whole package length
+                    else:
+                        self.ip_map[ip_inner.dst] = {'bytes':len(msg.data), 'tun_id':teid}
+                        print(self.ip_map)
+                except Exception as e:
+                    self.logger.warning("UE IP could not be accesed: %s", e)
+
+    def add_service_queue_flow(self, datapath, tun_id, in_port, queue_id):
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        
+        match = parser.OFPMatch(
+        in_port=in_port,
+            eth_type=0x0800,         # IPv4
+            ip_proto=17,             # UDP
+            udp_dst=2152,            # GTP-U Port
+            tunnel_id=tun_id         # TEID match
+        )
+
+        # Actions, (setQueue and normal)
+        actions = [
+            parser.OFPActionSetQueue(queue_id),
+            parser.OFPActionOutput(ofproto.OFPP_NORMAL)
+        ]
+
+        # Install flow
+        self.add_flow(datapath, match=match, actions=actions)
+
+        class_ = self.get_class(queue_id-2)
+        ip = [ip for ip in self.ip_map if self.ip_map[ip]['tun_id'] == tun_id]
+        self.logger.info("Flow installed on queue: %s(%s) for UE: %s(%s)",class_,queue_id, ip, tun_id)
+        
+    def monitor_throughput(self, interval):
+        for ip, (bytes_, tun_id) in self.ip_map.items():
+            throughput = (int(bytes_) * 8) / 1000000 / interval  #Mbps
+            
+            self.logger.info("%s throughput: %.2f Mbps",ip, throughput)
+
+            self.ip_map[ip]['bytes'] = 0
+        
+        # Call again after <interval> seconds
+        threading.Timer(interval, self.monitor_throughput, [interval]).start()

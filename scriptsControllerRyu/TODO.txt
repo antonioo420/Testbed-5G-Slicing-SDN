@@ -1,0 +1,3 @@
+Parametrizar port_name al crear y actualizar queues
+
+Ver que tipo de videos son los que funcionan mejor en youtube
