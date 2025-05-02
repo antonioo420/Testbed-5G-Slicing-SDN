@@ -40,12 +40,11 @@ class SimpleMonitor(app_manager.RyuApp):
         self.model = load_model("/home/lab/traffic_predictor.h5", custom_objects={'mse': MeanSquaredError()})
         self.logger.info("Modelo cargado")
         self.datapath = None
-        self.window = defaultdict(lambda: deque(maxlen=LOOKBACK))
+        self.window = defaultdict(lambda: deque([0]* 30,maxlen=LOOKBACK))
         self.ues = set()
         self.dpid_str = {}
         self.ip_map = {}
         self.last_pred = defaultdict(lambda: deque(maxlen=LAST_PRED))
-        #self.monitor_throughput(0.5)
         logging.getLogger('ryu.controller.ofp_handler').setLevel(logging.WARNING)
         
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
@@ -61,9 +60,9 @@ class SimpleMonitor(app_manager.RyuApp):
             time.sleep(1)
             self.set_ovsdb_addr(self.dpid_str)
             time.sleep(1)
-            self.create_queues(self.dpid_str, 50000000, 20000000)
+            self.create_queues(self.dpid_str, 1000000, 20000000)
             self.send_to_controller_from_port(datapath, 9)
-            self.monitor_thread = hub.spawn(self._monitor)
+            self.prediction_throughput_handler()
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
@@ -110,7 +109,7 @@ class SimpleMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(datapath=datapath,
-                                priority=200,
+                                priority=300,
                                 match=match,
                                 instructions=inst)
         datapath.send_msg(mod)
@@ -126,7 +125,7 @@ class SimpleMonitor(app_manager.RyuApp):
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
 
         mod = parser.OFPFlowMod(datapath=datapath,
-                                priority=200,
+                                priority=250,
                                 match=match,
                                 instructions=inst)
         datapath.send_msg(mod)
@@ -152,15 +151,15 @@ class SimpleMonitor(app_manager.RyuApp):
         url = "http://localhost:8080/qos/queue/"+dpid 
         
         queues = {
-            "port_name": "enp2s1",
+            "port_name": "ens23",
             "type": "linux-htb",
             "queues": [
                 {"max_rate": str(rate0)},   # Queue 0
                 {"max_rate": str(rate1)},    # Queue 1
-                {"max_rate": str(10000000)},   # Queue 2
-                {"max_rate": str(20000000)},   # Queue 3
-                {"max_rate": str(10000000)},   # Queue 4
-                {"max_rate": str(10000000)}   # Queue 5
+                {"max_rate": str(100000000)},   # Queue 2
+                {"max_rate": str(1000000000)},   # Queue 3
+                {"max_rate": str(3000000000)},   # Queue 4
+                {"max_rate": str(4000000000)}   # Queue 5
             ]
         }
         headers = {"Content-Type": "application/json"}
@@ -195,7 +194,7 @@ class SimpleMonitor(app_manager.RyuApp):
         url = "http://localhost:8080/qos/queue/"+dpid 
         
         queues = {
-            "port_name": "enp2s1",
+            "port_name": "ens23",
             "type": "linux-htb",
             "queues": [
                 {"max_rate": str(rate0)}    # Queue 0
@@ -214,21 +213,38 @@ class SimpleMonitor(app_manager.RyuApp):
                 self.logger.error(f"Error updating QoS: {r.text}")
         except Exception as e:
             self.logger.error(f"Exception while requesting to REST API: {e}")
-                
-    def _monitor(self):
-        """ Sends stats request every 0.5 seconds """
-        while True:
-            #for dp in self.datapaths.values():
-            self._request_stats(self.datapath)
-            hub.sleep(0.5)  
+            
+    def prediction_throughput_handler(self):
+        # Downlink throughput
+        for ip in self.ip_map:
+            throughput = (int(self.ip_map[ip]['bytes']) * 8) / 1000000 / 0.5  # UE throughput in Mbps
+            self.logger.info("%s throughput: %.2f Mbps",ip, throughput)
+            self.ip_map[ip]['bytes'] = 0
+            
+            self.window[ip].append(float(throughput))
 
-    def _request_stats(self, datapath):
-        """ Requests stats of switch ports """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
-        datapath.send_msg(req)
+            if len(self.window[ip]) == LOOKBACK:
+                aux_window = self.window[ip]
+                input_data = np.array(aux_window).reshape(1, LOOKBACK, 1)
+                throughput_pred, class_pred = self.model.predict(input_data)
 
+                throughput = throughput_pred[0][0]  # Throughput prediction
+                class_value = np.argmax(class_pred[0])  # Class prediction
+
+                class_ = self.get_class(class_value)
+                self.logger.info(f"%s throughput prediction: {throughput:.2f}", ip)
+                self.logger.info(f"%s class prediction: {class_}", ip) 
+
+                self.last_pred[ip].append(class_value)
+                if len(self.last_pred[ip]) == LAST_PRED:
+                    max_class = max(set(self.last_pred[ip]), key=self.last_pred[ip].count)
+                    self.add_service_queue_flow(self.datapath, self.ip_map[ip]['tun_id'], 9, 2) # 9 = UPF Download port
+                    self.last_pred[ip].clear()
+                    
+                #self.qos_policy(throughput)
+                print("\n")
+        threading.Timer(0.5, self.prediction_throughput_handler).start()
+    
     def get_class(self, class_value):
         if class_value == 0:
             return 'youtube'
@@ -238,53 +254,11 @@ class SimpleMonitor(app_manager.RyuApp):
             return 'prime'
         elif class_value == 3:
             return 'tiktok'
-    
-    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
-    def _port_stats_reply_handler(self, ev):
-        # Receives and procceses ports stats 
-        body = ev.msg.body
-        now_rx_bytes = {}
-
-        for stat in sorted(body, key=lambda x: x.port_no):
-            port = stat.port_no
-            now_rx_bytes[port] = stat.rx_bytes
             
-            if port == 9:
-                for ip in self.ip_map:
-                    # Downlink throughput
-                    throughput = (int(self.ip_map[ip]['bytes']) * 8) / 1000000 / 0.5  #Mbps
-                    self.logger.info("%s throughput: %.2f Mbps",ip, throughput)
-                    self.ip_map[ip]['bytes'] = 0
-                    
-                    self.window[ip].append(float(throughput))
-
-                    if len(self.window[ip]) == LOOKBACK:
-                        aux_window = self.window[ip]
-                        input_data = np.array(aux_window).reshape(1, LOOKBACK, 1)
-                        throughput_pred, class_pred = self.model.predict(input_data)
-
-                        throughput = throughput_pred[0][0]  # Throughput prediction
-                        class_value = np.argmax(class_pred[0])  # Class prediction
-
-                        class_ = self.get_class(class_value)
-                        self.logger.info(f"%s throughput prediction: {throughput:.2f}", ip)
-                        self.logger.info(f"%s class prediction: {class_}", ip) 
-
-                        self.last_pred[ip].append(class_value)
-                        if len(self.last_pred[ip]) == LAST_PRED:
-                            max_class = max(set(self.last_pred[ip]), key=self.last_pred[ip].count)
-                            self.add_service_queue_flow(self.datapath, self.ip_map[ip]['tun_id'], port, max_class+2)
-                            self.last_pred[ip].clear()
-                            
-                        #self.qos_policy(throughput)
-                        print("\n")
-        self.prev_rx_bytes = now_rx_bytes
-    
-
     def qos_policy(self, prediction):
         """ Policy to establish the new max_rate of the queues """
         response_queues = self.get_queues(self.dpid_str)
-        curr_max_rate = int(response_queues[0]["command_result"]["details"]["enp2s1"]["0"]["config"]["max-rate"])
+        curr_max_rate = int(response_queues[0]["command_result"]["details"]["ens23"]["0"]["config"]["max-rate"])
         prediction = prediction * 1000000
         print(prediction, curr_max_rate)
         if prediction > curr_max_rate: 
@@ -333,6 +307,8 @@ class SimpleMonitor(app_manager.RyuApp):
                     if ip_inner.dst in self.ip_map:
                         self.ip_map[ip_inner.dst]['bytes'] += len(msg.data) # Whole package length
                     else:
+                       
+                        print(teid)
                         self.ip_map[ip_inner.dst] = {'bytes':len(msg.data), 'tun_id':teid}
                         print(self.ip_map)
                 except Exception as e:
@@ -341,12 +317,14 @@ class SimpleMonitor(app_manager.RyuApp):
     def add_service_queue_flow(self, datapath, tun_id, in_port, queue_id):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
-        
+
+        padding = 10
+        tun_id = hex(f"{teid:#0{padding}x}")
         match = parser.OFPMatch(
-        in_port=in_port,
+            in_port=in_port,
             eth_type=0x0800,         # IPv4
             ip_proto=17,             # UDP
-            udp_dst=2152,            # GTP-U Port
+            #udp_dst=2152,            # GTP-U Port
             tunnel_id=tun_id         # TEID match
         )
 
