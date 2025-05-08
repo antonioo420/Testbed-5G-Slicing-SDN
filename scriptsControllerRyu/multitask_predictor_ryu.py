@@ -30,6 +30,9 @@ import struct
 
 LOOKBACK = 30
 LAST_PRED = 10
+
+MAX_BR = 60000000
+THRESHOLD = 30000000
 #window = deque([0]* 30,maxlen=LOOKBACK)
 
 class SimpleMonitor(app_manager.RyuApp):
@@ -45,6 +48,8 @@ class SimpleMonitor(app_manager.RyuApp):
         self.dpid_str = {}
         self.ip_map = {}
         self.last_pred = defaultdict(lambda: deque(maxlen=LAST_PRED))
+        self.prev_rx_bytes = {}
+        self.monitor_result = pd.DataFrame(columns=['throughput', 'max_rate'])
         logging.getLogger('ryu.controller.ofp_handler').setLevel(logging.WARNING)
         
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
@@ -60,9 +65,11 @@ class SimpleMonitor(app_manager.RyuApp):
             time.sleep(1)
             self.set_ovsdb_addr(self.dpid_str)
             time.sleep(1)
-            self.create_queues(self.dpid_str, 1000000, 20000000)
-            self.send_to_controller_from_port(datapath, 9)
-            self.prediction_throughput_handler()
+            self.create_queues(self.dpid_str, THRESHOLD, 20000000)
+            #self.send_to_controller_from_port(datapath, 9)
+            self.monitor_thread = hub.spawn(self._monitor)
+            #self.monitor_throughput(0.5)
+            #self.prediction_throughput_handler()
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
                 del self.datapaths[datapath.id]
@@ -238,7 +245,7 @@ class SimpleMonitor(app_manager.RyuApp):
                 self.last_pred[ip].append(class_value)
                 if len(self.last_pred[ip]) == LAST_PRED:
                     max_class = max(set(self.last_pred[ip]), key=self.last_pred[ip].count)
-                    self.add_service_queue_flow(self.datapath, self.ip_map[ip]['tun_id'], 9, 2) # 9 = UPF Download port
+                    self.add_service_queue_flow(self.datapath, self.ip_map[ip]['tun_id'], 9, 2) # 9 = UPF port
                     self.last_pred[ip].clear()
                     
                 #self.qos_policy(throughput)
@@ -307,8 +314,6 @@ class SimpleMonitor(app_manager.RyuApp):
                     if ip_inner.dst in self.ip_map:
                         self.ip_map[ip_inner.dst]['bytes'] += len(msg.data) # Whole package length
                     else:
-                       
-                        print(teid)
                         self.ip_map[ip_inner.dst] = {'bytes':len(msg.data), 'tun_id':teid}
                         print(self.ip_map)
                 except Exception as e:
@@ -319,7 +324,6 @@ class SimpleMonitor(app_manager.RyuApp):
         ofproto = datapath.ofproto
 
         padding = 10
-        tun_id = hex(f"{teid:#0{padding}x}")
         match = parser.OFPMatch(
             in_port=in_port,
             eth_type=0x0800,         # IPv4
@@ -343,11 +347,85 @@ class SimpleMonitor(app_manager.RyuApp):
         
     def monitor_throughput(self, interval):
         for ip, (bytes_, tun_id) in self.ip_map.items():
-            throughput = (int(bytes_) * 8) / 1000000 / interval  #Mbps
-            
-            self.logger.info("%s throughput: %.2f Mbps",ip, throughput)
+            # Downlink throughput
+            throughput = self.ip_map[ip]['bytes'] * 8 / interval  #bps
 
-            self.ip_map[ip]['bytes'] = 0
-        
+            self.logger.info("%s throughput: %.2f Mbps",ip, throughput/1000000)
+            
+            self.ip_map[ip]['bytes'] = 0    
+
+            response_queues = self.get_queues(self.dpid_str)
+            current_max_rate = int(response_queues[0]["command_result"]["details"]["ens23"]["0"]["config"]["max-rate"])
+            
+            if throughput > THRESHOLD*0.9:
+                if current_max_rate != MAX_BR:
+                    self.update_queues(self.dpid_str, MAX_BR)
+                    self.logger.info(f'Max rate updated to {MAX_BR}')    
+            else:
+                if current_max_rate != THRESHOLD:
+                    self.update_queues(self.dpid_str, THRESHOLD)
+                    self.logger.info(f'Max rate updated to {THRESHOLD}')  
+
+            new_row = pd.DataFrame([[throughput/1000000, current_max_rate/1000000]], columns=['throughput', 'max_rate'])
+            self.monitor_result = pd.concat([self.monitor_result, new_row.dropna(axis=1)], ignore_index=True)  
+            self.monitor_result.to_csv(f"monitor_result.csv", index=False)  # Guardar DataFrame en CSV
+
         # Call again after <interval> seconds
         threading.Timer(interval, self.monitor_throughput, [interval]).start()
+
+    def _monitor(self):
+        # Sends stats request every 0.5 seconds 
+        while True:
+            self._request_stats(self.datapath)
+            hub.sleep(0.5)
+
+    def _request_stats(self, datapath):
+       # Requests stats of switch ports 
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
+        datapath.send_msg(req)
+
+    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
+    def calc_throughput_ports_stats (self, ev):
+        #  Receives and procceses ports stats
+        body = ev.msg.body
+        now_rx_bytes = {}
+
+        for stat in sorted(body, key=lambda x: x.port_no):
+            port = stat.port_no
+            now_rx_bytes[port] = stat.rx_bytes
+
+            if port == 9:
+                if port in self.prev_rx_bytes:
+                    try:
+                        # Downlink throughput
+                        rx_diff = stat.rx_bytes - self.prev_rx_bytes[port]
+                        throughput_rx = (rx_diff * 8 * 2)   # (bps)
+
+                        self.logger.info(f'Port {port}: RX {throughput_rx/1000000:.2f} Mbps')    
+
+                        response_queues = self.get_queues(self.dpid_str)
+                        current_max_rate = int(response_queues[0]["command_result"]["details"]["ens23"]["0"]["config"]["max-rate"])
+                        
+                        if throughput_rx > THRESHOLD:
+                            if current_max_rate != MAX_BR:
+                                self.update_queues(self.dpid_str, MAX_BR)
+                                self.logger.info(f'Max rate updated to {MAX_BR}')    
+                        else:
+                            if current_max_rate != THRESHOLD:
+                                self.update_queues(self.dpid_str, THRESHOLD)
+                                self.logger.info(f'Max rate updated to {THRESHOLD}')  
+
+                        new_row = pd.DataFrame([[throughput_rx/1000000, current_max_rate/1000000]], columns=['throughput', 'max_rate'])
+                        self.monitor_result = pd.concat([self.monitor_result, new_row.dropna(axis=1)], ignore_index=True)  
+                        self.monitor_result.to_csv(f"monitor_result.csv", index=False)  # Guardar DataFrame en CSV
+                    except KeyboardInterrupt:
+                            # Captura la interrupción de teclado (Ctrl+C)
+                            print(f"\nInterrupción detectada. Guardando los datos en 'monitor.csv'...")        
+                            self.monitor_result.to_csv(f"monitor_result.csv", index=False)  # Guardar DataFrame en CSV
+                            print(f"Datos guardados exitosamente en 'monitor_result.csv'.")
+                            
+        self.prev_rx_bytes = now_rx_bytes
+  
+    
